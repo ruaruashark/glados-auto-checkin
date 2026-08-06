@@ -1,0 +1,38 @@
+name: GLaDOS Checkin
+
+on:
+  schedule:
+    # UTC 16:10 = 北京时间次日 00:10（与教程一致）
+    - cron: "10 16 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: write
+
+jobs:
+  checkin:
+    name: GLaDOS 每日签到
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 执行签到
+        env:
+          GLADOS: ${{ secrets.GLADOS }}
+          GLADOS_DOMAINS: ${{ secrets.GLADOS_DOMAINS }}
+          NOTIFY: ${{ secrets.NOTIFY }}
+        run: python checkin.py
+
+      - name: 防止 Actions 因仓库长期无活动被禁用
+        uses: liskin/gh-workflow-keepalive@v1
