@@ -56,23 +56,45 @@ class CheckinProtocolTests(unittest.TestCase):
 
         self.session.post.assert_not_called()
 
+    @patch("checkin.time.sleep")
+    @patch("checkin.time.monotonic", side_effect=[100.0, 102.7])
     @patch("checkin.requests.Session")
-    def test_turnstile_requires_manual_checkin(self, session_factory):
+    def test_turnstile_configuration_does_not_stop_before_response(self, session_factory, _clock, _sleep):
         session_factory.return_value = self.session
         self.session.get.return_value.json.return_value["turnstile"] = {"sitekey": "fake"}
 
-        with self.assertRaises(checkin.ManualVerificationRequired):
-            checkin.api_checkin("fake-cookie", "glados.one")
+        result = checkin.api_checkin("fake-cookie", "glados.one")
 
-        self.session.post.assert_not_called()
+        self.assertEqual(result["code"], 0)
+        self.session.post.assert_called_once()
+        self.assertEqual(self.session.post.call_args.kwargs["json"]["tsState"], "error")
+        self.assertNotIn("turnstile", self.session.post.call_args.kwargs["json"])
 
-    @patch("checkin.api_checkin", side_effect=checkin.ManualVerificationRequired("请手动签到"))
-    def test_turnstile_does_not_fall_back_to_another_domain(self, api_checkin):
+    @patch("checkin.api_checkin")
+    def test_server_rejection_can_fall_back_to_another_domain(self, api_checkin):
+        api_checkin.side_effect = [
+            {"code": 4, "reason": "turnstile", "message": "Cloudflare verification failed"},
+            {"code": 0, "points": 7, "message": "Checkin!"},
+        ]
+        with patch("checkin.api_status", return_value={"data": {"leftDays": 632}}):
+            ok, summary = checkin.checkin_one(1, "fake-cookie", ["glados.one", "glados.cloud"])
+
+        self.assertTrue(ok)
+        self.assertIn("服务端要求人机验证", summary)
+        self.assertIn("签到成功", summary)
+        self.assertEqual(api_checkin.call_count, 2)
+
+    @patch("checkin.api_checkin")
+    @patch("checkin.api_status", return_value={"data": {"leftDays": 632}})
+    def test_all_server_rejections_report_failure(self, _status, api_checkin):
+        api_checkin.return_value = {
+            "code": 4, "reason": "turnstile", "message": "Cloudflare verification failed"
+        }
         ok, summary = checkin.checkin_one(1, "fake-cookie", ["glados.one", "glados.cloud"])
 
         self.assertFalse(ok)
-        self.assertIn("请手动签到", summary)
-        api_checkin.assert_called_once_with("fake-cookie", "glados.one")
+        self.assertEqual(summary.count("服务端要求人机验证"), 2)
+        self.assertEqual(api_checkin.call_count, 2)
 
 
 if __name__ == "__main__":

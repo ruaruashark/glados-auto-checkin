@@ -2,7 +2,7 @@
 
 每天计划在**北京时间 00:10** 执行 GLaDOS 签到，可把结果推送到微信等渠道。GitHub Actions 的定时任务可能延迟或偶尔跳过，实际时间以运行记录为准。
 
-2026 年 11 月起，官网签到先获取一次性 challenge，再提交 nonce/proof；旧版只发送 `token` 的脚本可能显示签到成功，但只入账 1 分。本脚本按当前官网流程提交。若官网要求 Turnstile 人机验证，会停止自动签到并提示手动处理，不会退回旧请求占用当天签到。实际奖励由 GLaDOS 服务端决定。
+2026 年 11 月起，官网签到先获取一次性 challenge，再提交 nonce/proof；旧版只发送 `token` 的脚本可能显示签到成功，但只入账 1 分。本脚本先完成 challenge/proof，再由服务端判断是否还需要 Turnstile。普通 HTTP 脚本无法生成浏览器中的 Turnstile 令牌；只有服务端明确拒绝时才报告人机验证失败。实际奖励由 GLaDOS 服务端决定。
 
 ## 一、准备
 
@@ -64,7 +64,7 @@ git push -u origin main
 
 - **Cookie 过期**：GLaDOS 的 Cookie 会失效。发现日志出现签到失败时，重新登录 GLaDOS，复制新 Cookie 更新 `GLADOS` 这个 secret 即可。
 - **只有 1 分**：先确认运行的是包含 challenge/proof 的新版脚本、签到域名与手动页面一致，再核对官网积分流水。已经入账的当天奖励无法通过重复签到补差。
-- **要求人机验证或设备不匹配**：脚本会明确失败，不会静默发送旧版请求。检查 Cookie 和登录浏览器的 User-Agent；需要真人验证时在官网手动完成。
+- **要求人机验证或设备不匹配**：脚本会显示服务端的失败信息，不会静默发送旧版请求。检查 Cookie 和登录浏览器的 User-Agent；需要真人验证时在官网手动完成。
 - **多账号**：`GLADOS` 里每行写一个 Cookie 即可（也兼容用 `&&` 分隔）。
 - **域名失效**：脚本默认依次尝试 `glados.one`、`glados.cloud` 和 `glados.rocks`。若官网换域名，更新 `GLADOS_DOMAINS`。
 - **收不到通知**：检查 `NOTIFY` 格式是否正确；不填推送渠道时，结果只在 Actions 日志里。

@@ -28,10 +28,6 @@ USER_AGENT = (
 CHALLENGE_WAIT_SECONDS = 2.7
 
 
-class ManualVerificationRequired(RuntimeError):
-    """站点要求在浏览器中完成真人验证。"""
-
-
 def load_cookies():
     raw = (os.environ.get("GLADOS_COOKIE") or os.environ.get("GLADOS") or "").strip()
     if not raw:
@@ -89,9 +85,6 @@ def api_checkin(cookie, domain):
         challenge = challenge_response.json()
         if not isinstance(challenge, dict) or challenge.get("code") != 0:
             raise RuntimeError("服务端未提供有效签到验证")
-        if challenge.get("turnstile"):
-            raise ManualVerificationRequired("站点要求浏览器人机验证，请手动签到")
-
         nonce = challenge.get("nonce")
         ttl = challenge.get("ttl", 300000)
         if (
@@ -112,7 +105,13 @@ def api_checkin(cookie, domain):
         resp = session.post(
             f"{base_url}/api/user/checkin",
             headers=headers,
-            json={"token": domain, "nonce": nonce, "proof": proof, "tsState": "off"},
+            json={
+                "token": domain,
+                "nonce": nonce,
+                "proof": proof,
+                # 无浏览器环境就无法获取 Turnstile 令牌；让服务端判断此时是否必须验证。
+                "tsState": "error" if challenge.get("turnstile") else "off",
+            },
             timeout=30,
         )
         resp.raise_for_status()
@@ -133,11 +132,11 @@ def api_status(cookie, domain):
 
 
 def mask_cookie(cookie):
-    """只显示 cookie 的键名和长度，避免把完整 cookie 打印到日志。"""
+    """只显示 cookie 的首个键名和总长度，不打印任何凭据片段。"""
     first = cookie.split(";")[0].strip()
     if "=" in first:
-        name, value = first.split("=", 1)
-        return f"{name}={value[:4]}***（共 {len(cookie)} 字符）"
+        name = first.split("=", 1)[0]
+        return f"{name}=***（共 {len(cookie)} 字符）"
     return f"***（共 {len(cookie)} 字符）"
 
 
@@ -147,9 +146,6 @@ def checkin_one(idx, cookie, domains):
     for domain in domains:
         try:
             data = api_checkin(cookie, domain)
-        except ManualVerificationRequired as exc:
-            lines.append(f"[{domain}] ❌ {exc}")
-            return False, "\n".join(lines)
         except Exception as exc:
             lines.append(f"[{domain}] 签到请求失败：{exc}")
             continue
@@ -174,9 +170,13 @@ def checkin_one(idx, cookie, domains):
             lines.append(f"[{domain}] 🔄 今天已签过：{message}")
             return True, "\n".join(lines)
 
-        if data.get("reason") in ("turnstile", "device-mismatch"):
+        if data.get("reason") == "device-mismatch":
             lines.append(f"[{domain}] ❌ 服务端拒绝签到：{message}（{data['reason']}）")
             return False, "\n".join(lines)
+
+        if data.get("reason") == "turnstile" or "cloudflare verification failed" in message.lower():
+            lines.append(f"[{domain}] ❌ 服务端要求人机验证，未记录签到：{message}")
+            continue
 
         lines.append(f"[{domain}] ❌ 签到失败：{message}")
 
