@@ -36,6 +36,7 @@ jobs:
         env:
           GLADOS: ${{ secrets.GLADOS }}
           GLADOS_DOMAINS: ${{ secrets.GLADOS_DOMAINS }}
+          GLADOS_USER_AGENT: ${{ secrets.GLADOS_USER_AGENT }}
           NOTIFY: ${{ secrets.NOTIFY }}
         run: python checkin.py
 

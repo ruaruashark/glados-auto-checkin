@@ -7,20 +7,29 @@
 
 环境变量:
     GLADOS          必填。GLaDOS 登录 Cookie；多账号每行一个（也可用 && 分隔）
-    GLADOS_DOMAINS  可选。逗号分隔的签到域名，默认 glados.cloud,glados.rocks
+    GLADOS_DOMAINS  可选。逗号分隔的签到域名，默认 glados.one,glados.cloud,glados.rocks
+    GLADOS_USER_AGENT 可选。登录浏览器的 User-Agent，建议与取得 Cookie 的浏览器一致
     NOTIFY          可选。通知渠道，每行一个，格式见 README（pushplus:/wxpusher:/bark:/qyweixin:/console:）
 """
 
+import hashlib
+import math
 import os
 import sys
+import time
 
 import requests
 
-DEFAULT_DOMAINS = ["glados.cloud", "glados.rocks"]
+DEFAULT_DOMAINS = ["glados.one", "glados.cloud", "glados.rocks"]
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
+CHALLENGE_WAIT_SECONDS = 2.7
+
+
+class ManualVerificationRequired(RuntimeError):
+    """站点要求在浏览器中完成真人验证。"""
 
 
 def load_cookies():
@@ -46,10 +55,21 @@ def load_domains():
     return DEFAULT_DOMAINS
 
 
+def load_user_agent():
+    value = os.environ.get("GLADOS_USER_AGENT", "").strip() or USER_AGENT
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError("GLADOS_USER_AGENT 必须是单行请求头值")
+    try:
+        value.encode("latin-1")
+    except UnicodeEncodeError as exc:
+        raise ValueError("GLADOS_USER_AGENT 含有请求头不支持的字符") from exc
+    return value
+
+
 def headers_for(cookie, domain):
     return {
         "cookie": cookie,
-        "user-agent": USER_AGENT,
+        "user-agent": load_user_agent(),
         "origin": f"https://{domain}",
         "referer": f"https://{domain}/console/checkin",
         "content-type": "application/json",
@@ -57,14 +77,49 @@ def headers_for(cookie, domain):
 
 
 def api_checkin(cookie, domain):
-    resp = requests.post(
-        f"https://{domain}/api/user/checkin",
-        headers=headers_for(cookie, domain),
-        json={"token": domain},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    base_url = f"https://{domain}"
+    headers = headers_for(cookie, domain)
+    with requests.Session() as session:
+        challenge_response = session.get(
+            f"{base_url}/api/user/checkin/challenge",
+            headers=headers,
+            timeout=30,
+        )
+        challenge_response.raise_for_status()
+        challenge = challenge_response.json()
+        if not isinstance(challenge, dict) or challenge.get("code") != 0:
+            raise RuntimeError("服务端未提供有效签到验证")
+        if challenge.get("turnstile"):
+            raise ManualVerificationRequired("站点要求浏览器人机验证，请手动签到")
+
+        nonce = challenge.get("nonce")
+        ttl = challenge.get("ttl", 300000)
+        if (
+            not isinstance(nonce, str)
+            or not 0 < len(nonce) <= 4096
+            or type(ttl) not in (int, float)
+            or not math.isfinite(ttl)
+            or ttl <= CHALLENGE_WAIT_SECONDS * 1000
+        ):
+            raise RuntimeError("服务端返回的签到验证无效")
+
+        received_at = time.monotonic()
+        proof = hashlib.sha256((nonce + ".glados-observe-v1").encode()).hexdigest()
+        time.sleep(CHALLENGE_WAIT_SECONDS)
+        if (time.monotonic() - received_at) * 1000 >= ttl:
+            raise RuntimeError("签到验证已过期，本次未提交签到")
+
+        resp = session.post(
+            f"{base_url}/api/user/checkin",
+            headers=headers,
+            json={"token": domain, "nonce": nonce, "proof": proof, "tsState": "off"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        if not isinstance(result, dict):
+            raise RuntimeError("签到接口返回格式异常")
+        return result
 
 
 def api_status(cookie, domain):
@@ -92,16 +147,20 @@ def checkin_one(idx, cookie, domains):
     for domain in domains:
         try:
             data = api_checkin(cookie, domain)
+        except ManualVerificationRequired as exc:
+            lines.append(f"[{domain}] ❌ {exc}")
+            return False, "\n".join(lines)
         except Exception as exc:
             lines.append(f"[{domain}] 签到请求失败：{exc}")
             continue
 
         code = data.get("code")
         message = data.get("message", "")
-        points = data.get("points", 0)
+        points = data.get("points")
 
         if code == 0:
-            lines.append(f"[{domain}] ✅ 签到成功：{message}（获得 {points} 积分）")
+            points_text = f"（获得 {points} 积分）" if points is not None else ""
+            lines.append(f"[{domain}] ✅ 签到成功：{message}{points_text}")
             try:
                 status = api_status(cookie, domain)
                 left_days = status.get("data", {}).get("leftDays")
@@ -114,6 +173,10 @@ def checkin_one(idx, cookie, domains):
         if code == 1:
             lines.append(f"[{domain}] 🔄 今天已签过：{message}")
             return True, "\n".join(lines)
+
+        if data.get("reason") in ("turnstile", "device-mismatch"):
+            lines.append(f"[{domain}] ❌ 服务端拒绝签到：{message}（{data['reason']}）")
+            return False, "\n".join(lines)
 
         lines.append(f"[{domain}] ❌ 签到失败：{message}")
 
@@ -245,6 +308,11 @@ def send_notifications(title, content):
 def main():
     cookies = load_cookies()
     domains = load_domains()
+    try:
+        load_user_agent()
+    except ValueError as exc:
+        print(f"配置错误：{exc}")
+        sys.exit(1)
 
     print(f"共 {len(cookies)} 个账号，将依次尝试域名：{', '.join(domains)}")
 
